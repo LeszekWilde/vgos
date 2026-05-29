@@ -1,8 +1,40 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Leszek Wilde
 
+use pic8259::ChainedPics;
 use spin::LazyLock;
+use spin::Mutex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+
+/// Architectural exception and hardware interrupt vector offset for the primary 8259 PIC.
+/// The Intel x86_64 CPU reserves vectors 0-31 for architectural exceptions.
+pub const PIC_1_OFFSET: u8 = 32;
+
+/// Architectural exception and hardware interrupt vector offset for the secondary 8259 PIC.
+/// Cascaded from the primary PIC, using the subsequent 8 vectors.
+pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
+
+/// Global abstraction for the dual cascaded Intel 8259 Programmable Interrupt Controllers (PICs).
+/// Encapsulated in a spinlock Mutex to ensure mutually exclusive access during runtime mask modifications.
+pub static PICS: Mutex<ChainedPics> =
+    Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+
+/// Enumeration of hardware interrupt vector offsets relative to the primary PIC remapping baseline.
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum InterruptIndex {
+    /// Programmable Interval Timer (IRQ 0).
+    Timer = PIC_1_OFFSET,
+    /// PS/2 Keyboard Controller (IRQ 1).
+    Keyboard,
+}
+
+impl InterruptIndex {
+    /// Helper method to cast the interrupt enum variant directly into its raw 8-bit vector representation.
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
 
 /// Global Interrupt Descriptor Table (IDT).
 /// Initialized lazily upon first access to prevent premature initialization
@@ -13,6 +45,10 @@ static IDT: LazyLock<InterruptDescriptorTable> = LazyLock::new(|| {
     idt.breakpoint.set_handler_fn(breakpoint_handler);
     idt.double_fault.set_handler_fn(double_fault_handler);
     idt.page_fault.set_handler_fn(page_fault_handler);
+
+    // Wire up hardware interrupt handlers using computed entry indexes
+    idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
+    idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
 
     idt
 });
@@ -63,5 +99,38 @@ extern "x86-interrupt" fn page_fault_handler(
     // In this basic bootstrap phase, we place the core into an infinite low-power halt state.
     loop {
         x86_64::instructions::hlt();
+    }
+}
+
+// Interrupt handler for the Programmable Interval Timer (PIT - IRQ 0).
+// Dispatched continuously based on PIT channel configurations.
+extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Acknowledge the hardware timer, but do not print anything.
+    // Printing here can cause a permanent deadlock with the VGA text buffer's spinlock!
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    }
+}
+
+// Interrupt handler for the PS/2 Keyboard (IRQ 1).
+// Fires whenever a key state transition changes on the physical controller.
+extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    use x86_64::instructions::port::Port;
+
+    // The keyboard controller outputs its data to I/O Port 0x60
+    let mut port = Port::new(0x60);
+
+    // Read the raw electrical signal (scancode) from the motherboard interface.
+    // This action also implicitly unblocks the PS/2 controller data register.
+    let scancode: u8 = unsafe { port.read() };
+
+    crate::println!("Key: {}", scancode);
+
+    // Issue End of Interrupt (EOI) to command the primary 8259 PIC to lower its
+    // In-Service Register (ISR) bit, re-enabling subsequent IRQ processing.
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
     }
 }

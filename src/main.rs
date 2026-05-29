@@ -130,22 +130,53 @@ pub extern "C" fn _start() -> ! {
                     alloc::string::String::from("Rust string living on the bare-metal heap!");
                 println!("Dynamically allocated String: '{}'", my_string);
 
-                println!("\n--- Initializing CPU Exceptions ---");
+                println!("\n--- Initializing CPU Exceptions & IDT ---");
                 interrupts::init_idt();
                 println!("IDT Loaded.");
 
-                println!("Triggering a fatal Page Fault...");
+                println!("\n--- Initializing Hardware Interrupts ---");
+
+                // 1. Disable the Local APIC via its Model Specific Register (IA32_APIC_BASE MSR 0x1B).
+                // Clearing bit 11 (APIC Global Enable) routes hardware interrupts away from the APIC
+                // and redirects them back to the legacy 8259 Programmable Interrupt Controller (PIC).
                 unsafe {
-                    // Dereferencing an arbitrary hardware address bypassing Rust's safety guarantees.
-                    // Converting to a raw *mut u8 byte pointer circumvents potential alignment-induced
-                    // undefined behavior checks, directly forcing the MMU to trigger an architectural
-                    // Page Fault (Vector 14) upon volatile evaluation.
-                    let invalid_ptr = 0xDEADBEEF as *mut u8;
-                    let _value = invalid_ptr.read_volatile();
+                    let mut apic_base_msr = x86_64::registers::model_specific::Msr::new(0x1B);
+                    let mut value = apic_base_msr.read();
+                    value &= !(1 << 11); // Unset bit 11
+                    apic_base_msr.write(value);
                 }
 
-                // Code execution path unreachable due to entering the unrecoverable Page Fault state.
-                println!("You will never see this message!");
+                // 2. Initialize the legacy dual 8259 PICs and update interrupt masks.
+                // Mask value 0xFC (11111100b) leaves IRQ 0 (Timer) and IRQ 1 (Keyboard) unmasked on Master.
+                // Mask value 0xFF (11111111b) completely mutes all interrupt lines on the Slave PIC.
+                unsafe {
+                    let mut pics = interrupts::PICS.lock();
+                    pics.initialize();
+                    pics.write_masks(0xFC, 0xFF);
+                };
+
+                // 3. Purge the legacy 8042 PS/2 controller buffer.
+                // Evaluates the controller's Status Register (Port 0x64). If bit 0 (Output Buffer Full)
+                // is active, the stale byte is read and discarded from Data Port 0x60 to prevent latching.
+                unsafe {
+                    let mut status_port = x86_64::instructions::port::Port::<u8>::new(0x64);
+                    let mut data_port = x86_64::instructions::port::Port::<u8>::new(0x60);
+                    while (status_port.read() & 1) != 0 {
+                        let _discarded = data_port.read();
+                    }
+                }
+
+                // 4. Assert the x86 CPU Interrupt Flag (IF) inside the RFLAGS register.
+                // This unmasks hardware interrupts globally, allowing the core to receive async signals.
+                x86_64::instructions::interrupts::enable();
+
+                println!("System fully operational. Waiting for interrupts...");
+
+                // Halt the core continuously. Incoming hardware interrupts will awaken the CPU,
+                // execute their registered handler, and re-enter this low-power halt loop.
+                loop {
+                    x86_64::instructions::hlt();
+                }
             } else {
                 println!("Fatal: Bootloader did not provide a memory map.");
             }
