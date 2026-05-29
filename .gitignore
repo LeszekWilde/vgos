@@ -1,0 +1,10 @@
+# Rust compilation artifacts
+/target/
+
+# Make generation artifacts
+/limine/
+/iso_dir/
+vgos.iso
+
+# OS specific
+.DS_Store
