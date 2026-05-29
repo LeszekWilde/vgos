@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Leszek Wilde
 
-#![no_std] // Kernel cannot depend on the Rust standard library
-#![no_main] // Disable the standard Rust main entry point
+#![feature(abi_x86_interrupt)]
+#![no_std]
+#![no_main]
 
 extern crate alloc;
 
 mod allocator;
+mod interrupts;
 mod memory;
 mod writer;
 
@@ -29,7 +31,6 @@ macro_rules! println {
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
-use core::panic::PanicInfo;
 use limine::BaseRevision;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest};
 
@@ -128,6 +129,23 @@ pub extern "C" fn _start() -> ! {
                 let my_string =
                     alloc::string::String::from("Rust string living on the bare-metal heap!");
                 println!("Dynamically allocated String: '{}'", my_string);
+
+                println!("\n--- Initializing CPU Exceptions ---");
+                interrupts::init_idt();
+                println!("IDT Loaded.");
+
+                println!("Triggering a fatal Page Fault...");
+                unsafe {
+                    // Dereferencing an arbitrary hardware address bypassing Rust's safety guarantees.
+                    // Converting to a raw *mut u8 byte pointer circumvents potential alignment-induced
+                    // undefined behavior checks, directly forcing the MMU to trigger an architectural
+                    // Page Fault (Vector 14) upon volatile evaluation.
+                    let invalid_ptr = 0xDEADBEEF as *mut u8;
+                    let _value = invalid_ptr.read_volatile();
+                }
+
+                // Code execution path unreachable due to entering the unrecoverable Page Fault state.
+                println!("You will never see this message!");
             } else {
                 println!("Fatal: Bootloader did not provide a memory map.");
             }
@@ -143,8 +161,11 @@ pub extern "C" fn _start() -> ! {
 /// System-wide unrecoverable crash hook.
 /// Suspends physical processor instructions instantly.
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    crate::println!("\nKERNEL PANIC!");
+    crate::println!("{}", info);
     loop {
-        unsafe { core::arch::asm!("hlt") };
+        // Safely halt the CPU to save power instead of spinning at 100% CPU utilization
+        x86_64::instructions::hlt();
     }
 }
