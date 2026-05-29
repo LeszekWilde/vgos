@@ -125,6 +125,44 @@ impl BitmapAllocator {
         None
     }
 
+    /// Finds a contiguous block of N free frames and returns the physical base address.
+    pub fn allocate_contiguous(&mut self, num_frames: usize) -> Option<usize> {
+        if self.free_frames < num_frames {
+            return None;
+        }
+
+        let mut current_consecutive = 0;
+        let mut start_frame = 0;
+
+        // Scan the entire bitmap bit-by-bit to find a contiguous free block
+        for frame in 0..self.total_frames {
+            let byte_idx = frame / 8;
+            let bit_idx = frame % 8;
+
+            let is_used = unsafe {
+                let byte = self.bitmap_ptr.add(byte_idx).read();
+                (byte & (1 << bit_idx)) != 0
+            };
+
+            if is_used {
+                current_consecutive = 0;
+                start_frame = frame + 1; // Reset our search to the next available frame index
+            } else {
+                current_consecutive += 1;
+
+                // Match identified for requested allocation span layout
+                if current_consecutive == num_frames {
+                    // Lock all tracking bits encompassing this structural slice
+                    for i in 0..num_frames {
+                        self.lock_frame(start_frame + i);
+                    }
+                    return Some(start_frame * PAGE_SIZE);
+                }
+            }
+        }
+        None // Target alignment block is omitted or memory is too fragmented
+    }
+
     /// Internal helper to set a specific frame's tracking bit to 0 (Free).
     fn free_frame(&mut self, frame: usize) {
         let byte_idx = frame / 8;

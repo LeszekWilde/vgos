@@ -4,6 +4,9 @@
 #![no_std] // Kernel cannot depend on the Rust standard library
 #![no_main] // Disable the standard Rust main entry point
 
+extern crate alloc;
+
+mod allocator;
 mod memory;
 mod writer;
 
@@ -91,19 +94,40 @@ pub extern "C" fn _start() -> ! {
                 // Initialize physical allocations based on usable RAM regions
                 PMM.lock().init(entries, hhdm_offset);
 
-                println!("\n--- Testing PMM Allocator ---");
+                println!("\n--- Bootstrapping Global Heap ---");
 
-                let mut pmm = PMM.lock();
+                // Request a 1 Megabyte Heap allocation (256 frames of 4KB each)
+                let heap_size = 1024 * 1024;
+                let heap_frames = heap_size / memory::PAGE_SIZE;
 
-                if let Some(addr1) = pmm.allocate_frame() {
-                    println!("Allocated Frame 1 at Physical Address: {:#018X}", addr1);
+                // 1. Query the PMM for a contiguous sequence of free physical frames
+                if let Some(heap_phys_addr) = PMM.lock().allocate_contiguous(heap_frames) {
+                    // 2. Map physical space to higher-half virtual space to avoid CPU Page Faults
+                    let heap_virt_addr = heap_phys_addr + hhdm_offset as usize;
+
+                    // 3. Bind the translated memory region to the Linked List Heap management layer
+                    allocator::init_heap(heap_virt_addr, heap_size);
+                    println!(
+                        "Heap initialized at Virtual Address: {:#018X} ({} KB)",
+                        heap_virt_addr,
+                        heap_size / 1024
+                    );
+                } else {
+                    panic!("Fatal: PMM could not find enough contiguous memory for the Heap!");
                 }
-                if let Some(addr2) = pmm.allocate_frame() {
-                    println!("Allocated Frame 2 at Physical Address: {:#018X}", addr2);
+
+                println!("\n--- Testing Rust Dynamic Types ---");
+
+                // Verify global heap assignment using native alloc dynamic collection types
+                let mut my_vec = alloc::vec::Vec::new();
+                for i in 1..=5 {
+                    my_vec.push(i * 10);
                 }
-                if let Some(addr3) = pmm.allocate_frame() {
-                    println!("Allocated Frame 3 at Physical Address: {:#018X}", addr3);
-                }
+                println!("Dynamically allocated Vec: {:?}", my_vec);
+
+                let my_string =
+                    alloc::string::String::from("Rust string living on the bare-metal heap!");
+                println!("Dynamically allocated String: '{}'", my_string);
             } else {
                 println!("Fatal: Bootloader did not provide a memory map.");
             }
