@@ -47,9 +47,41 @@ impl Writer {
     }
 
     /// Renders a single ASCII/Unicode character to the screen using an 8x8 font bitmap matrix.
+    /// Handles mechanical line tracking, manual backspacing deletions, and horizontal wrapping.
     fn write_char(&mut self, c: char) {
         if c == '\n' {
             self.newline();
+            return;
+        }
+
+        // Handle Backspace control characters (\x08)
+        if c == '\x08' {
+            // Prevent the cursor from underflowing off the left side of the screen boundary
+            if self.cursor_x >= 8 {
+                // Adjust cursor coordinate backward by exactly one font matrix block size (8 pixels)
+                self.cursor_x -= 8;
+
+                let bytes_per_pixel = self.bpp / 8;
+
+                // Draw a solid 8x8 black square to physically clear the old character out of memory
+                for row_idx in 0..8 {
+                    for col_idx in 0..8 {
+                        let x = self.cursor_x + col_idx;
+                        let y = self.cursor_y + row_idx;
+                        let offset = (y * self.pitch) + (x * bytes_per_pixel);
+
+                        // Safety: Assumes that the mutated offset layout does not overflow the
+                        // allocated bounds specified during hardware initialization.
+                        unsafe {
+                            // Paint target pixel black (0x00, 0x00, 0x00) across RGB channels
+                            core::ptr::write_volatile(self.framebuffer.add(offset), 0x00);
+                            core::ptr::write_volatile(self.framebuffer.add(offset + 1), 0x00);
+                            core::ptr::write_volatile(self.framebuffer.add(offset + 2), 0x00);
+                        }
+                    }
+                }
+            }
+            // Exit early to avoid advancing the structural tracking cursor coordinates forward
             return;
         }
 

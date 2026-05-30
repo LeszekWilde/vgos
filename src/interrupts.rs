@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Leszek Wilde
 
+use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
 use pic8259::ChainedPics;
 use spin::LazyLock;
 use spin::Mutex;
@@ -28,6 +29,18 @@ pub enum InterruptIndex {
     /// PS/2 Keyboard Controller (IRQ 1).
     Keyboard,
 }
+
+/// Global tracking state for the PS/2 keyboard protocol translation layers.
+/// Encapsulated within a spinlock Mutex to permit state alteration inside asynchronous interrupt contexts.
+/// Configured using a standard UK 105-key layout and Scancode Set 1 execution specifications.
+pub static KEYBOARD: LazyLock<Mutex<Keyboard<layouts::Uk105Key, ScancodeSet1>>> =
+    LazyLock::new(|| {
+        Mutex::new(Keyboard::new(
+            ScancodeSet1::new(),
+            layouts::Uk105Key,
+            HandleControl::Ignore,
+        ))
+    });
 
 impl InterruptIndex {
     /// Helper method to cast the interrupt enum variant directly into its raw 8-bit vector representation.
@@ -118,16 +131,29 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
-    // The keyboard controller outputs its data to I/O Port 0x60
+    // 1. Read the raw byte from the motherboard I/O Port 0x60 (PS/2 Data Port).
+    // This action implicitly clear-acknowledges the data channel on the hardware device.
     let mut port = Port::new(0x60);
-
-    // Read the raw electrical signal (scancode) from the motherboard interface.
-    // This action also implicitly unblocks the PS/2 controller data register.
     let scancode: u8 = unsafe { port.read() };
 
-    crate::println!("Key: {}", scancode);
+    // 2. Lock the global keyboard state machine. Avoids data races across asynchronous paths.
+    let mut keyboard = KEYBOARD.lock();
 
-    // Issue End of Interrupt (EOI) to command the primary 8259 PIC to lower its
+    // 3. Feed the raw byte into the state machine to track multi-byte escape sequences
+    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+        // 4. If the byte completed a valid keypress/release sequence, decode it
+        if let Some(key) = keyboard.process_keyevent(key_event) {
+            match key {
+                // Renders standard ascii/unicode characters directly out to the system console
+                DecodedKey::Unicode(character) => crate::print!("{}", character),
+
+                // We intentionally ignore raw control keys so they don't print "LShift" strings
+                DecodedKey::RawKey(_) => {}
+            }
+        }
+    }
+
+    // 5. Issue End of Interrupt (EOI) to command the primary 8259 PIC to lower its
     // In-Service Register (ISR) bit, re-enabling subsequent IRQ processing.
     unsafe {
         PICS.lock()
