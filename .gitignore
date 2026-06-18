@@ -1,0 +1,10 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# OS Build artifacts
+/iso_dir/
+vgos.iso
+
+# Limine bootloader source/binaries
+/limine/
