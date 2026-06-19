@@ -2,7 +2,7 @@ KERNEL := target/x86_64-kernel/debug/vgos
 ISO := vgos.iso
 LIMINE_VERSION = 12.3.3
 
-.PHONY: all run clean
+.PHONY: all run clean $(KERNEL)
 
 all: $(ISO)
 
