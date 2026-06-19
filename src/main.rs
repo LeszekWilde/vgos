@@ -18,14 +18,14 @@
 
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
 
 mod framebuffer;
+mod interrupts;
 
 use core::panic::PanicInfo;
 use limine::request::FramebufferRequest;
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
-
-use core::fmt::Write;
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -61,23 +61,26 @@ pub extern "C" fn _start() -> ! {
             let width = framebuffer.width as usize;
             let height = framebuffer.height as usize;
 
-            // Instantiate the kernel-space screen renderer.
-            let mut writer = framebuffer::Writer::new(fb_ptr, pitch, width, height);
+            // Configure the global video output subsystem.
+            framebuffer::init_global_writer(fb_ptr, pitch, width, height);
 
-            // Print the initial operating system greeting.
-            let _ = writeln!(writer, "Welcome to VGOS!");
+            // Log successful initialization in green text.
+            framebuffer::WRITER.lock().set_color(0x00_00_FF_00);
+            println!("[ OK ] Framebuffer initialized");
 
-            // Log successful initialisation in green text.
-            writer.set_color(0x00_00_FF_00);
-            let _ = writeln!(
-                writer,
-                "[ OK ] Framebuffer initialised ({}x{})",
-                width, height
-            );
+            // --- IDT Initialization ---
+            framebuffer::WRITER.lock().set_color(0x00_FF_FF_FF);
+            println!("Loading Interrupt Descriptor Table...");
 
-            // Reset text color to default white for upcoming status logs.
-            writer.set_color(0x00_FF_FF_FF);
-            let _ = writeln!(writer, "[INFO] Ready for next subsystem...");
+            // Initialize the Interrupt Descriptor Table handlers.
+            interrupts::init_idt();
+
+            // Log successful descriptor layout configuration.
+            framebuffer::WRITER.lock().set_color(0x00_00_FF_00);
+            println!("[ OK ] IDT loaded successfully");
+
+            // Reset text color back to default white.
+            framebuffer::WRITER.lock().set_color(0x00_FF_FF_FF);
         }
     }
 
@@ -91,7 +94,11 @@ pub extern "C" fn _start() -> ! {
 
 /// Handles kernel panics by permanently halting the CPU.
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    // Highlight fatal kernel runtime panics using red text output.
+    framebuffer::WRITER.lock().set_color(0x00_FF_00_00);
+    println!("{}", info);
+
     // Safely trap execution to avoid undefined CPU states during a panic.
     loop {
         unsafe {

@@ -18,6 +18,19 @@
 
 use core::fmt;
 use font8x8::UnicodeFonts;
+use spin::{LazyLock, Mutex};
+
+/// A global, thread-safe instance of the framebuffer Writer.
+/// It is initially uninitialized and must be configured via `init_global_writer`
+/// before calling any print macros.
+pub static WRITER: LazyLock<Mutex<Writer>> = LazyLock::new(|| Mutex::new(Writer::uninitialized()));
+
+/// Initializes the global WRITER with the bootloader's framebuffer data.
+/// This MUST be called inside `_start` before any printing happens.
+pub fn init_global_writer(fb_ptr: *mut u8, pitch: usize, width: usize, height: usize) {
+    let mut writer = WRITER.lock();
+    *writer = Writer::new(fb_ptr, pitch, width, height);
+}
 
 /// A text renderer that manages writing characters directly to a raw pixel framebuffer.
 pub struct Writer {
@@ -29,9 +42,29 @@ pub struct Writer {
     y: usize,
     color: u32,
     scale: usize,
+    initialized: bool,
 }
 
+// Ensure the `Writer` state can be safely transferred and accessed across threads.
+unsafe impl Send for Writer {}
+unsafe impl Sync for Writer {}
+
 impl Writer {
+    /// Creates an empty placeholder Writer. Used by the Lazy static initialization.
+    const fn uninitialized() -> Self {
+        Self {
+            fb_ptr: core::ptr::null_mut(),
+            pitch: 0,
+            width: 0,
+            height: 0,
+            x: 0,
+            y: 0,
+            color: 0x00_FF_FF_FF,
+            scale: 2,
+            initialized: false,
+        }
+    }
+
     /// Creates a new `Writer` instance tied to a specific linear framebuffer.
     pub fn new(fb_ptr: *mut u8, pitch: usize, width: usize, height: usize) -> Self {
         Self {
@@ -43,6 +76,7 @@ impl Writer {
             y: 0,
             color: 0x00_FF_FF_FF, // Default to solid white
             scale: 2,             // Default text scaling factor
+            initialized: true,
         }
     }
 
@@ -131,4 +165,24 @@ impl fmt::Write for Writer {
         self.write_string(s);
         Ok(())
     }
+}
+
+/// Standard macro for printing text output through the global kernel writer.
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => ($crate::framebuffer::_print(format_args!($($arg)*)));
+}
+
+/// Standard macro for printing text output with an appended newline character.
+#[macro_export]
+macro_rules! println {
+    () => ($crate::print!("\n"));
+    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
+}
+
+#[doc(hidden)]
+pub fn _print(args: fmt::Arguments) {
+    use core::fmt::Write;
+    // Lock the spin mutex, write the formatted arguments, and release the lock.
+    WRITER.lock().write_fmt(args).unwrap();
 }
